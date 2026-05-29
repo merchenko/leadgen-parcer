@@ -1,0 +1,19 @@
+[project]
+name = "telegram-freelance-lead-bot"
+version = "0.1.0"
+description = "Telegram bot that monitors freelance channels and sends filtered leads."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Egor Andrienko" }]
+dependencies = [
+    "telethon>=1.35,<2",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Egor01KKK/telegram-freelance-lead-bot"
+
+[project.scripts]
+telegram-freelance-lead-bot = "freelancer_bot.app:cli"
+
