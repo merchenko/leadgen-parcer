@@ -100,7 +100,7 @@ def register_onboarding(
     async def cmd_demo(event: events.NewMessage.Event) -> None:
         if not await is_allowed(event):
             return
-        await _show_success(event, name="Алекс", phone="+79991234567")
+        await _show_success(event, name="Иван Иванов", phone="+70000000000")
 
     # ── /start для новых пользователей ────────────────────────────────────────
     # Берём из .env: ALLOWED_USERNAMES=username1,username2
