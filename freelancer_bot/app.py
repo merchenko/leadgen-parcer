@@ -33,15 +33,12 @@ class AwaitState(Enum):
 
 
 MAIN_KEYBOARD = [
-    [Button.text("📊 Статус"),           Button.text("📡 Источники")],
-    [Button.text("🔑 Ключевые слова"),    Button.text("🧪 Тест фильтра")],
-    [Button.text("➕ Источник"),           Button.text("➖ Источник")],
-    [Button.text("➕ Ключ-слово"),         Button.text("➖ Ключ-слово")],
-    [Button.text("⏸ Пауза"),              Button.text("▶️ Возобновить")],
+    [Button.text("📋 Открыть меню")],
 ]
 
 # Тексты кнопок — handle_input игнорирует их чтобы не конфликтовать с кнопочными хендлерами
 _BUTTON_TEXTS = frozenset({
+    "📋 Открыть меню",
     "📊 Статус", "📡 Источники",
     "🔑 Ключевые слова", "🧪 Тест фильтра",
     "➕ Источник", "➖ Источник",
@@ -71,6 +68,18 @@ class LeadBot:
     def _get_admin_chat_id(self, event: events.NewMessage.Event) -> int | None:
         chat_id = int(event.chat_id)
         return chat_id if self.config.is_admin(chat_id) else None
+
+    async def attach(self, bot_client: TelegramClient, user_client: TelegramClient) -> None:
+        """Присоединяется к внешним клиентам — не создаёт свои."""
+        self.bot_client = bot_client
+        self.user_client = user_client
+        self._register_handlers()
+        if self.config.target_chat_id is not None:
+            self.storage.add_subscriber(self.config.target_chat_id)
+        active = await self._register_source_handlers()
+        LOGGER.info("Freelancer: мониторю %s источников", len(active))
+        if self.config.send_catch_up and self.config.catch_up_limit > 0:
+            await self._catch_up(active)
 
     async def run(self) -> None:
         self._register_handlers()
@@ -114,6 +123,12 @@ class LeadBot:
             LOGGER.warning("Could not set bot commands: %s", exc)
 
     def _register_handlers(self) -> None:
+
+        @self.bot_client.on(events.NewMessage(pattern=r"^📋 Открыть меню"))
+        async def open_menu(event: events.NewMessage.Event) -> None:
+            if self._get_admin_chat_id(event) is None:
+                return
+            await event.respond("/menu")
 
         @self.bot_client.on(events.NewMessage(pattern=r"^(/start|▶️ Возобновить)"))
         async def start(event: events.NewMessage.Event) -> None:
