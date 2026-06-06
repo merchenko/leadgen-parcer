@@ -124,27 +124,14 @@ class LeadBot:
 
     def _register_handlers(self) -> None:
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^📋 Открыть меню"))
-        async def open_menu(event: events.NewMessage.Event) -> None:
-            if self._get_admin_chat_id(event) is None:
-                return
-            await event.respond("/menu")
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/start|▶️ Возобновить)"))
-        async def start(event: events.NewMessage.Event) -> None:
+        @self.bot_client.on(events.NewMessage(pattern=r"^▶️ Возобновить"))
+        async def fl_resume(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
             self._awaiting.pop(chat_id, None)
             self.storage.add_subscriber(chat_id)
-            stats = self.storage.stats()
-            await event.respond(
-                "✅ <b>Бот активен</b> — лиды идут!\n\n"
-                f"📡 Источников: <b>{len(self.storage.get_enabled_sources())}</b>\n"
-                f"📥 Лидов в базе: <b>{stats['leads']}</b>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
-            )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/stop|⏸ Пауза)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/stop$"))
         async def stop(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -152,10 +139,10 @@ class LeadBot:
             self.storage.remove_subscriber(chat_id)
             await event.respond(
                 "⏸ <b>Пауза.</b> Нажми <b>▶️ Возобновить</b> чтобы включить снова.",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/status|📊 Статус)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/fl_status$"))
         async def status(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -171,10 +158,10 @@ class LeadBot:
                 f"🔑 Ключевых слов: <b>{len(kw)}</b> | стоп-слов: <b>{len(sw)}</b>\n"
                 f"📥 Лидов в базе: <b>{stats['leads']}</b>\n"
                 f"🕐 Ожидают отправки: <b>{stats['pending']}</b>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/sources|📡 Источники)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/sources$"))
         async def sources_cmd(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -186,10 +173,10 @@ class LeadBot:
             ]
             await event.respond(
                 f"📡 <b>Активные источники ({len(srcs)})</b>\n\n" + "\n".join(lines),
-                parse_mode="html", link_preview=False, buttons=MAIN_KEYBOARD,
+                parse_mode="html", link_preview=False, buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/keywords|🔑 Ключевые слова)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/fl_keywords$"))
         async def keywords_cmd(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -201,10 +188,10 @@ class LeadBot:
             await event.respond(
                 f"🔑 <b>Ключевые слова ({len(kw)})</b>\n<i>{kw_text}</i>\n\n"
                 f"🚫 <b>Стоп-слова ({len(sw)})</b>\n<i>{sw_text}</i>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/test|🧪 Тест фильтра)(?:\s+(.+))?"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/test(?:\s+(.+))?"))
         async def test_filter(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -214,7 +201,7 @@ class LeadBot:
             if not text:
                 await event.respond(
                     "🧪 Пришли текст после команды:\n<code>/test нужен телеграм бот на Python</code>",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
                 return
             kw = self.storage.get_active_keywords()
@@ -224,7 +211,7 @@ class LeadBot:
                 await event.respond(
                     f"✅ <b>Пройдёт фильтр</b>\nScore: <b>{result.score}</b>\n"
                     f"Совпало: <i>{', '.join(result.matched_keywords)}</i>",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
             else:
                 reason = (
@@ -234,63 +221,8 @@ class LeadBot:
                 )
                 await event.respond(
                     f"❌ <b>Не пройдёт фильтр</b>\n{reason}",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➕ Источник$"))
-        async def add_source_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.ADD_SOURCE
-            await event.respond(
-                "➕ <b>Добавить источник</b>\n\n"
-                "Пришли username канала, например:\n<code>@freelancehunt</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➖ Источник$"))
-        async def remove_source_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            srcs = self.storage.get_enabled_sources()
-            if not srcs:
-                await event.respond("Активных источников нет.", buttons=MAIN_KEYBOARD)
-                return
-            self._awaiting[chat_id] = AwaitState.REMOVE_SOURCE
-            lines = [f"{i}. {s.handle} — {s.title}" for i, s in enumerate(srcs, 1)]
-            await event.respond(
-                "➖ <b>Убрать источник</b>\n\n"
-                + "\n".join(lines)
-                + "\n\nПришли <b>номер</b> из списка или <code>отмена</code>.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➕ Ключ-слово$"))
-        async def add_kw_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.ADD_KEYWORD
-            await event.respond(
-                "➕ <b>Добавить ключевое слово</b>\n\n"
-                "Формат: <code>слово вес</code> — для ключевого\n"
-                "Или: <code>!слово</code> — для стоп-слова\n\n"
-                "Примеры:\n<code>crm 3</code>\n<code>!дизайнер</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➖ Ключ-слово$"))
-        async def remove_kw_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.REMOVE_KEYWORD
-            await event.respond(
-                "➖ <b>Удалить слово из фильтра</b>\n\n"
-                "Пришли само слово, например:\n<code>python</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
 
         @self.bot_client.on(events.NewMessage())
         async def handle_input(event: events.NewMessage.Event) -> None:
@@ -305,7 +237,7 @@ class LeadBot:
                 return
             if text.lower() == "отмена":
                 self._awaiting.pop(chat_id, None)
-                await event.respond("Отменено.", buttons=MAIN_KEYBOARD)
+                await event.respond("Отменено.", buttons=None)
                 return
 
             if state == AwaitState.ADD_SOURCE:
@@ -318,7 +250,7 @@ class LeadBot:
                     if added else
                     f"ℹ️ Источник <code>{handle}</code> уже был в списке — включён."
                 )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
             elif state == AwaitState.REMOVE_SOURCE:
                 srcs = self.storage.get_enabled_sources()
@@ -337,7 +269,7 @@ class LeadBot:
                 self._awaiting.pop(chat_id, None)
                 await event.respond(
                     f"🗑 Источник <code>{src.handle}</code> отключён.",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
 
             elif state == AwaitState.ADD_KEYWORD:
@@ -369,7 +301,7 @@ class LeadBot:
                         if added else
                         f"ℹ️ Слово <code>{word}</code> уже есть."
                     )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
             elif state == AwaitState.REMOVE_KEYWORD:
                 removed = self.storage.remove_keyword(text)
@@ -379,7 +311,7 @@ class LeadBot:
                     if removed else
                     f"❌ Слово <code>{text}</code> не найдено."
                 )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
     async def _register_source_handlers(self) -> list[tuple[SourceRow, object]]:
         from .storage import SourceRow

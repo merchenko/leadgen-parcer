@@ -98,16 +98,28 @@ def register_onboarding(
     # ── /demo — тестовый прогон без реальной авторизации ─────────────────────
     @bot.on(events.NewMessage(pattern="/demo"))
     async def cmd_demo(event: events.NewMessage.Event) -> None:
-        if is_admin(event.chat_id):
+        if not await is_allowed(event):
             return
         await _show_success(event, name="Алекс", phone="+79991234567")
 
     # ── /start для новых пользователей ────────────────────────────────────────
-    @bot.on(events.NewMessage(pattern="/start"))
+    # Берём из .env: ALLOWED_USERNAMES=username1,username2
+    _raw = os.getenv("ALLOWED_USERNAMES", "")
+    ALLOWED_USERNAMES = {u.strip().lower().lstrip("@") for u in _raw.split(",") if u.strip()}
+
+    async def is_allowed(event) -> bool:
+        if is_admin(event.chat_id):
+            return False  # Admins handled in bot_commands.py
+        if not ALLOWED_USERNAMES:
+            return True  # Если не задано — открыт для всех
+        sender = await event.get_sender()
+        username = (getattr(sender, "username", None) or "").lower()
+        return username in ALLOWED_USERNAMES
+
+    @bot.on(events.NewMessage(pattern=r"^/start$"))
     async def cmd_start_new(event: events.NewMessage.Event) -> None:
-        tg_id = event.chat_id
-        if is_admin(tg_id):
-            return  # Admins handled in bot_commands.py
+        if not await is_allowed(event):
+            return
 
         tenant = storage.get_tenant(tg_id)
         if tenant and tenant["status"] == "active":
@@ -123,8 +135,7 @@ def register_onboarding(
     # ── Callback: начать онбординг ─────────────────────────────────────────────
     @bot.on(events.CallbackQuery(data=b"onboard_start"))
     async def cb_onboard_start(event: events.CallbackQuery.Event) -> None:
-        tg_id = event.chat_id
-        if is_admin(tg_id):
+        if not await is_allowed(event):
             await event.answer()
             return
 
@@ -147,9 +158,9 @@ def register_onboarding(
     @bot.on(events.NewMessage())
     async def handle_registration_input(event: events.NewMessage.Event) -> None:
         tg_id = event.chat_id
-        if is_admin(tg_id):
-            return
         if tg_id not in _sessions:
+            return
+        if not await is_allowed(event):
             return
         if event.text and event.text.startswith("/"):
             return

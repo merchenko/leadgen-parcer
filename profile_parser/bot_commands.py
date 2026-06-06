@@ -42,13 +42,13 @@ def register_commands(
     def is_admin(chat_id: int) -> bool:
         return chat_id in admin_ids
 
-    # ── /start ────────────────────────────────────────────────────────────────
-    @bot.on(events.NewMessage(pattern="/start"))
+    # ── /start и /menu ────────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/(start|menu)$"))
     async def cmd_start(event: events.NewMessage.Event) -> None:
         if not is_admin(event.chat_id):
             return
         await event.respond(
-            "👋 <b>Бот запущен.</b> Выбери раздел:",
+            "👋 <b>Выбери раздел:</b>",
             buttons=MAIN_KEYBOARD,
             parse_mode="html",
         )
