@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import logging
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 
 from dotenv import load_dotenv
@@ -19,7 +19,6 @@ from .filters import KEYWORDS as DEFAULT_KEYWORDS, STOP_WORDS as DEFAULT_STOP_WO
 from .formatting import format_lead
 from .sources import SOURCES as DEFAULT_SOURCES, Source
 from .storage import LeadRecord, Storage
-from .summarizer import summarize
 
 
 LOGGER = logging.getLogger("freelancer_bot")
@@ -33,15 +32,12 @@ class AwaitState(Enum):
 
 
 MAIN_KEYBOARD = [
-    [Button.text("📊 Статус"),           Button.text("📡 Источники")],
-    [Button.text("🔑 Ключевые слова"),    Button.text("🧪 Тест фильтра")],
-    [Button.text("➕ Источник"),           Button.text("➖ Источник")],
-    [Button.text("➕ Ключ-слово"),         Button.text("➖ Ключ-слово")],
-    [Button.text("⏸ Пауза"),              Button.text("▶️ Возобновить")],
+    [Button.text("📋 Открыть меню")],
 ]
 
 # Тексты кнопок — handle_input игнорирует их чтобы не конфликтовать с кнопочными хендлерами
 _BUTTON_TEXTS = frozenset({
+    "📋 Открыть меню",
     "📊 Статус", "📡 Источники",
     "🔑 Ключевые слова", "🧪 Тест фильтра",
     "➕ Источник", "➖ Источник",
@@ -57,6 +53,7 @@ class LeadBot:
         config.bot_session_path.parent.mkdir(parents=True, exist_ok=True)
         self.storage = Storage(config.database_path)
         self._awaiting: dict[int, AwaitState] = {}
+        self._active_sources: list = []
 
         self.storage.seed_sources([(s.handle, s.title) for s in DEFAULT_SOURCES if s.enabled])
         self.storage.seed_keywords(DEFAULT_KEYWORDS, DEFAULT_STOP_WORDS)
@@ -72,6 +69,19 @@ class LeadBot:
         chat_id = int(event.chat_id)
         return chat_id if self.config.is_admin(chat_id) else None
 
+    async def attach(self, bot_client: TelegramClient, user_client: TelegramClient) -> None:
+        """Присоединяется к внешним клиентам — не создаёт свои."""
+        self.bot_client = bot_client
+        self.user_client = user_client
+        self._register_handlers()
+        if self.config.target_chat_id is not None:
+            self.storage.add_subscriber(self.config.target_chat_id)
+        active = await self._register_source_handlers()
+        self._active_sources = active
+        LOGGER.info("Freelancer: мониторю %s источников", len(active))
+        if self.config.send_catch_up and self.config.catch_up_limit > 0:
+            await self._catch_up(active)
+
     async def run(self) -> None:
         self._register_handlers()
 
@@ -84,6 +94,7 @@ class LeadBot:
             self.storage.add_subscriber(self.config.target_chat_id)
 
         active = await self._register_source_handlers()
+        self._active_sources = active
         LOGGER.info("Monitoring %s Telegram sources", len(active))
 
         if self.config.send_catch_up and self.config.catch_up_limit > 0:
@@ -115,21 +126,14 @@ class LeadBot:
 
     def _register_handlers(self) -> None:
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/start|▶️ Возобновить)"))
-        async def start(event: events.NewMessage.Event) -> None:
+        @self.bot_client.on(events.NewMessage(pattern=r"^▶️ Возобновить"))
+        async def fl_resume(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
             self._awaiting.pop(chat_id, None)
             self.storage.add_subscriber(chat_id)
-            stats = self.storage.stats()
-            await event.respond(
-                "✅ <b>Бот активен</b> — лиды идут!\n\n"
-                f"📡 Источников: <b>{len(self.storage.get_enabled_sources())}</b>\n"
-                f"📥 Лидов в базе: <b>{stats['leads']}</b>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
-            )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/stop|⏸ Пауза)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/stop$"))
         async def stop(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -137,10 +141,10 @@ class LeadBot:
             self.storage.remove_subscriber(chat_id)
             await event.respond(
                 "⏸ <b>Пауза.</b> Нажми <b>▶️ Возобновить</b> чтобы включить снова.",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/status|📊 Статус)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/fl_status$"))
         async def status(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -156,10 +160,10 @@ class LeadBot:
                 f"🔑 Ключевых слов: <b>{len(kw)}</b> | стоп-слов: <b>{len(sw)}</b>\n"
                 f"📥 Лидов в базе: <b>{stats['leads']}</b>\n"
                 f"🕐 Ожидают отправки: <b>{stats['pending']}</b>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/sources|📡 Источники)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/sources$"))
         async def sources_cmd(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -171,10 +175,10 @@ class LeadBot:
             ]
             await event.respond(
                 f"📡 <b>Активные источники ({len(srcs)})</b>\n\n" + "\n".join(lines),
-                parse_mode="html", link_preview=False, buttons=MAIN_KEYBOARD,
+                parse_mode="html", link_preview=False, buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/keywords|🔑 Ключевые слова)"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/fl_keywords$"))
         async def keywords_cmd(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -186,10 +190,10 @@ class LeadBot:
             await event.respond(
                 f"🔑 <b>Ключевые слова ({len(kw)})</b>\n<i>{kw_text}</i>\n\n"
                 f"🚫 <b>Стоп-слова ({len(sw)})</b>\n<i>{sw_text}</i>",
-                parse_mode="html", buttons=MAIN_KEYBOARD,
+                parse_mode="html", buttons=None,
             )
 
-        @self.bot_client.on(events.NewMessage(pattern=r"^(/test|🧪 Тест фильтра)(?:\s+(.+))?"))
+        @self.bot_client.on(events.NewMessage(pattern=r"^/test(?:\s+(.+))?"))
         async def test_filter(event: events.NewMessage.Event) -> None:
             if (chat_id := self._get_admin_chat_id(event)) is None:
                 return
@@ -199,7 +203,7 @@ class LeadBot:
             if not text:
                 await event.respond(
                     "🧪 Пришли текст после команды:\n<code>/test нужен телеграм бот на Python</code>",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
                 return
             kw = self.storage.get_active_keywords()
@@ -209,7 +213,7 @@ class LeadBot:
                 await event.respond(
                     f"✅ <b>Пройдёт фильтр</b>\nScore: <b>{result.score}</b>\n"
                     f"Совпало: <i>{', '.join(result.matched_keywords)}</i>",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
             else:
                 reason = (
@@ -219,63 +223,8 @@ class LeadBot:
                 )
                 await event.respond(
                     f"❌ <b>Не пройдёт фильтр</b>\n{reason}",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➕ Источник$"))
-        async def add_source_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.ADD_SOURCE
-            await event.respond(
-                "➕ <b>Добавить источник</b>\n\n"
-                "Пришли username канала, например:\n<code>@freelancehunt</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➖ Источник$"))
-        async def remove_source_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            srcs = self.storage.get_enabled_sources()
-            if not srcs:
-                await event.respond("Активных источников нет.", buttons=MAIN_KEYBOARD)
-                return
-            self._awaiting[chat_id] = AwaitState.REMOVE_SOURCE
-            lines = [f"{i}. {s.handle} — {s.title}" for i, s in enumerate(srcs, 1)]
-            await event.respond(
-                "➖ <b>Убрать источник</b>\n\n"
-                + "\n".join(lines)
-                + "\n\nПришли <b>номер</b> из списка или <code>отмена</code>.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➕ Ключ-слово$"))
-        async def add_kw_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.ADD_KEYWORD
-            await event.respond(
-                "➕ <b>Добавить ключевое слово</b>\n\n"
-                "Формат: <code>слово вес</code> — для ключевого\n"
-                "Или: <code>!слово</code> — для стоп-слова\n\n"
-                "Примеры:\n<code>crm 3</code>\n<code>!дизайнер</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
-
-        @self.bot_client.on(events.NewMessage(pattern=r"^➖ Ключ-слово$"))
-        async def remove_kw_prompt(event: events.NewMessage.Event) -> None:
-            if (chat_id := self._get_admin_chat_id(event)) is None:
-                return
-            self._awaiting[chat_id] = AwaitState.REMOVE_KEYWORD
-            await event.respond(
-                "➖ <b>Удалить слово из фильтра</b>\n\n"
-                "Пришли само слово, например:\n<code>python</code>\n\n"
-                "Или <code>отмена</code> чтобы выйти.",
-                parse_mode="html",
-            )
 
         @self.bot_client.on(events.NewMessage())
         async def handle_input(event: events.NewMessage.Event) -> None:
@@ -290,7 +239,7 @@ class LeadBot:
                 return
             if text.lower() == "отмена":
                 self._awaiting.pop(chat_id, None)
-                await event.respond("Отменено.", buttons=MAIN_KEYBOARD)
+                await event.respond("Отменено.", buttons=None)
                 return
 
             if state == AwaitState.ADD_SOURCE:
@@ -303,7 +252,7 @@ class LeadBot:
                     if added else
                     f"ℹ️ Источник <code>{handle}</code> уже был в списке — включён."
                 )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
             elif state == AwaitState.REMOVE_SOURCE:
                 srcs = self.storage.get_enabled_sources()
@@ -322,7 +271,7 @@ class LeadBot:
                 self._awaiting.pop(chat_id, None)
                 await event.respond(
                     f"🗑 Источник <code>{src.handle}</code> отключён.",
-                    parse_mode="html", buttons=MAIN_KEYBOARD,
+                    parse_mode="html", buttons=None,
                 )
 
             elif state == AwaitState.ADD_KEYWORD:
@@ -354,7 +303,7 @@ class LeadBot:
                         if added else
                         f"ℹ️ Слово <code>{word}</code> уже есть."
                     )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
             elif state == AwaitState.REMOVE_KEYWORD:
                 removed = self.storage.remove_keyword(text)
@@ -364,7 +313,7 @@ class LeadBot:
                     if removed else
                     f"❌ Слово <code>{text}</code> не найдено."
                 )
-                await event.respond(msg, parse_mode="html", buttons=MAIN_KEYBOARD)
+                await event.respond(msg, parse_mode="html", buttons=None)
 
     async def _register_source_handlers(self) -> list[tuple[SourceRow, object]]:
         from .storage import SourceRow
@@ -384,11 +333,16 @@ class LeadBot:
         return active
 
     async def _catch_up(self, active_sources: list[tuple[object, object]]) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+
         async def fetch_channel(src, entity) -> list[tuple[datetime, object, Message]]:
             msgs: list[tuple[datetime, object, Message]] = []
             try:
                 async for msg in self.user_client.iter_messages(entity, limit=self.config.catch_up_limit):
-                    msgs.append((msg.date or datetime.now(timezone.utc), src, msg))
+                    msg_date = msg.date or datetime.now(timezone.utc)
+                    if msg_date < cutoff:
+                        break  # сообщения идут от новых к старым — дальше не смотрим
+                    msgs.append((msg_date, src, msg))
             except RPCError as exc:
                 LOGGER.warning("Could not catch up %s: %s", src.handle, exc)
             return msgs
@@ -401,7 +355,61 @@ class LeadBot:
         for _, src, message in buffered:
             await self._process_message(src.handle, src.title, message)
 
-    async def _process_message(self, handle: str, title: str, message: Message) -> None:
+    async def trigger_catchup(self, chat_id: int) -> None:
+        """
+        Catch-up для конкретного подписчика при нажатии 'Запустить'.
+        - Отправляет лиды за последние 5 дней независимо от того, получал ли их кто-то ранее.
+        - Останавливается если пользователь нажал паузу.
+        - Summarizer не вызывается (слишком много API вызовов подряд).
+        """
+        if not self._active_sources:
+            LOGGER.warning("trigger_catchup: нет активных источников")
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+        limit = self.config.catch_up_limit or 100
+
+        async def fetch_channel(src, entity):
+            msgs = []
+            try:
+                async for msg in self.user_client.iter_messages(entity, limit=limit):
+                    msg_date = msg.date or datetime.now(timezone.utc)
+                    if msg_date < cutoff:
+                        break
+                    msgs.append((msg_date, src, msg))
+            except RPCError as exc:
+                LOGGER.warning("trigger_catchup: Could not fetch %s: %s", src.handle, exc)
+            return msgs
+
+        results = await asyncio.gather(*[fetch_channel(src, entity) for src, entity in self._active_sources])
+        buffered = sorted(
+            (item for batch in results for item in batch),
+            key=lambda x: x[0],
+        )
+        sent = 0
+        for _, src, message in buffered:
+            if chat_id not in self.storage.subscribers():
+                LOGGER.info("trigger_catchup: пользователь %s нажал паузу — останавливаем", chat_id)
+                break
+            # catch-up: summarizer отключён, ignore_notified=True чтобы новый подписчик
+            # получил лиды которые уже были отправлены другим подписчикам
+            await self._process_message(
+                src.handle, src.title, message,
+                target_chat_id=chat_id,
+                summarize=False,
+                ignore_notified=True,
+            )
+            sent += 1
+        LOGGER.info("trigger_catchup: доставлено %s лидов для %s", sent, chat_id)
+
+    async def _process_message(
+        self,
+        handle: str,
+        title: str,
+        message: Message,
+        target_chat_id: int | None = None,
+        summarize: bool = True,
+        ignore_notified: bool = False,
+    ) -> None:
         text = message.message or ""
         if not text.strip():
             return
@@ -412,7 +420,7 @@ class LeadBot:
         if not match.accepted:
             return
 
-        subscribers = self.storage.subscribers()
+        subscribers = {target_chat_id} if target_chat_id is not None else self.storage.subscribers()
         if not subscribers:
             LOGGER.warning("Lead matched, but no subscribers configured: %s", handle)
             return
@@ -430,16 +438,22 @@ class LeadBot:
             message_date=message_date,
         )
 
-        if not self.storage.record_or_should_retry(lead):
+        # ignore_notified=True — catch-up для нового подписчика: отправляем даже если
+        # лид уже был доставлен другим подписчикам ранее
+        if ignore_notified:
+            self.storage.record_or_should_retry(lead)  # сохраняем в БД если ещё нет
+        elif not self.storage.record_or_should_retry(lead):
             return
 
-        try:
-            summary = await summarize(text)
-        except Exception as exc:
-            LOGGER.warning("Summarizer failed: %s", exc)
-            summary = None
+        summary_text: str | None = None
+        if summarize:
+            try:
+                from .summarizer import summarize as do_summarize
+                summary_text = await do_summarize(text)
+            except Exception as exc:
+                LOGGER.warning("Summarizer failed: %s", exc)
 
-        body = format_lead(src_obj, lead, summary=summary)
+        body = format_lead(src_obj, lead, summary=summary_text)
         results = await asyncio.gather(*(
             self.bot_client.send_message(chat_id, body, parse_mode="html", link_preview=False)
             for chat_id in subscribers

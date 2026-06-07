@@ -16,7 +16,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
 async def summarize(text: str) -> str:
     client = _get_client()
     response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-haiku-4-5",
         max_tokens=300,
         messages=[{
             "role": "user",
